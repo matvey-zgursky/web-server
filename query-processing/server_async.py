@@ -1,10 +1,11 @@
 import asyncio, sys
+from asyncio import StreamReader, StreamWriter
 
 
 counter = 0
 
 
-async def write_response(writer, response: bytearray, client_id: int) -> None:
+async def write_response(writer: StreamWriter, response: bytearray, client_id: int) -> None:
     writer.write(response)
     await writer.drain()
     writer.close()
@@ -16,7 +17,7 @@ async def handle_request(request: bytearray) -> bytearray:
     return request[::-1]
 
 
-async def read_request(reader, deliniiter=b'!')  -> bytearray | None:
+async def read_request(reader: StreamReader, deliniiter=b'!')  -> bytearray | None:
     request = bytearray()
     while True:
         chunk = await reader.read(4)
@@ -28,7 +29,7 @@ async def read_request(reader, deliniiter=b'!')  -> bytearray | None:
             return request
 
 
-async def serve_client(reader, writer) -> None:
+async def serve_client(reader: StreamReader, writer: StreamWriter) -> None:
     global counter
     client_id = counter
     counter += 1 # Потоко-безопасно, т.k все выполняется в одном потоке
