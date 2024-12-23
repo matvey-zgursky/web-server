@@ -1,6 +1,10 @@
 import socket
+import json
 import sys
+
 from email.parser import Parser
+from functools import lru_cache
+from urllib.parse import parse_qs, urlparse
 
 
 MAX_LINE = 64 * 1024
@@ -15,8 +19,30 @@ class Request:
         self.headers = headers
         self.rfile = rfile
 
+    @property
+    @lru_cache(maxsize=None)
+    def url(self):
+        return urlparse(self.target)
+
+    @property
+    @lru_cache(maxsize=None)
+    def query(self):
+        return parse_qs(self.url.query)
+
+    @property
+    def path(self):
+        return self.url.path
+
     def read_body(self):
         pass
+
+
+class Response:
+    def __init__(self, status, phrase, headers=None, body=None) -> None:
+        self.status = status
+        self.phrase = phrase
+        self.headers = headers
+        self.body = body 
 
 
 class MyHTTPServer:
@@ -24,6 +50,7 @@ class MyHTTPServer:
         self._host = host
         self._port = port
         self._server_name = server_name
+        self._users = {}
 
     def send_error(self, conn, error):
         pass
@@ -70,9 +97,6 @@ class MyHTTPServer:
         method, target, ver = self.parse_request_line(rfile)
         headers = self.parse_headers(rfile)
 
-        print('status line:', method, target, ver)
-        print('headers', headers)
-        
         host = headers.get('Host')
         if not host:
             raise Exception('Bad request')
@@ -82,15 +106,87 @@ class MyHTTPServer:
             raise Exception('Not found')
 
         return Request(method, target, ver, headers, rfile)
-    
+
+    def handle_post_users(self, request):
+        user_id = len(self._users) + 1
+        self._users[user_id] = {
+            'id': user_id,
+            'name': request.query['name'][0],
+            'age': request.query['age'][0]
+        }
+        
+        return Response(204, 'Created')
+
+    def handle_get_users(self, request):
+        accept = request.headers.get('Accept')
+        if 'text/html' in accept:
+            contenttype = 'text/html; charset=utf-8'
+            body = '<html><head></head></html>'
+            body += f'<div>Пользователи ({len(self._users)})</div>'
+            body += '<ul>'
+            for user in self._users.values():
+                body += f'<li>#{user["id"]} {user["name"]}, {user["age"]}</li>'
+            body += '</ul>'
+            body += '</body></html>'
+
+        elif 'application/json' in accept:
+            contenttype = 'application/json; charset=utf-8'
+            body = json.dumps(self._users)
+        
+        else:
+            return Response(406, 'Not Acceptable')
+        
+        body = body.encode('utf-8')
+        headers = [('Content-Type', contenttype),
+                   ('Content-Length', len(body))]
+            
+        return Response(200, 'OK', headers, body)
+
+    def handle_get_user(self, request, user_id):
+        user = self._users.get(int(user_id))
+        if not user:
+            return Response(404, 'Not Found')
+
+        accept = request.headers.get('Accept')
+        if 'text/html' in accept:
+            contenttype = 'text/html; charset=utf-8'
+            body = f'<html><head></head></html>'
+            body += f'Пользователь #{user["id"]} {user["name"]}, {user["age"]}'
+            body += '</body></html>'
+
+        elif 'application/json' in accept:
+            contenttype = 'application/json; charset=utf-8'
+            body = json.dumps(user)
+        
+        else:
+            return Response(406, 'Not Acceptable')
+        
+        body = body.encode('utf-8')
+        headers = [('Content-Type', contenttype),
+                   ('Content-Length', len(body))]
+                
+        return Response(200, 'OK', headers, body)
+
     def handle_request(self, request):
-        pass
+        if request.path == '/users' and request.method == 'POST':
+            return self.handle_post_users(request)
+
+        if request.path == '/users' and request.method == 'GET':
+            return self.handle_get_users(request)
+
+        if request.path.startswith('/users/'):
+            user_id = request.path[len('/users/'):]
+            if user_id.isdigit():
+                return self.handle_get_user(request, user_id)
+
+        raise Exception('Not found')
 
     def serve_client(self, conn: socket.socket) -> None:
         request = None
         try:
             request = self.parse_request(conn)
             response = self.handle_request(request)
+            print(response)
             self.send_response(conn, response)
         except ConnectionResetError:
             conn = None
