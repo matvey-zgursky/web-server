@@ -1,7 +1,9 @@
 import socket
 import sys
+from email.parser import Parser
 
-MAX_LINE = 64*1024
+
+MAX_LINE = 64 * 1024
 MAX_HEADERS = 100
 
 
@@ -35,19 +37,19 @@ class MyHTTPServer:
             raise Exception('Request line is too long')
 
         req_line = str(raw, 'iso-8859-1')
-        req_line = req_line.rstrip('\r\n')
-        words = req_line.split()            # разделяем по пробелу
-        if len(words) != 3:                 # и ожидаем ровно 3 части
+        words = req_line.split()  # разделяем по пробелу
+        if len(words) != 3:  # и ожидаем ровно 3 части
             raise Exception('Malformed request line')
 
         method, target, ver = words
         if ver != 'HTTP/1.1':
             raise Exception('Unexpected HTTP version')
-        
+
         return method, target, ver
 
     def parse_headers(self, rfile):
         headers = []
+
         while True:
             line = rfile.readline(MAX_LINE + 1)
             if len(line) > MAX_LINE:
@@ -57,19 +59,35 @@ class MyHTTPServer:
             headers.append(line)
             if len(headers) > MAX_HEADERS:
                 raise Exception('Too many headers')
-        
-        return headers
+
+        sheaders = b''.join(headers).decode('iso-8859-1')
+
+        return Parser().parsestr(sheaders)
 
     def parse_request(self, conn):
         rfile = conn.makefile('rb')
+
         method, target, ver = self.parse_request_line(rfile)
         headers = self.parse_headers(rfile)
-        print(method, target, ver)
-        print(headers)
+
+        print('status line:', method, target, ver)
+        print('headers', headers)
         
+        host = headers.get('Host')
+        if not host:
+            raise Exception('Bad request')
+
+        if host not in (self._server_name,
+                        f'{self._server_name}:{self._port}'):
+            raise Exception('Not found')
+
         return Request(method, target, ver, headers, rfile)
+    
+    def handle_request(self, request):
+        pass
 
     def serve_client(self, conn: socket.socket) -> None:
+        request = None
         try:
             request = self.parse_request(conn)
             response = self.handle_request(request)
@@ -80,7 +98,8 @@ class MyHTTPServer:
             self.send_error(conn, ex)
 
         if conn:
-            request.rfile.close()
+            if request and request.rfile:
+                request.rfile.close()
             conn.close()
 
     def serve_forever(self) -> None:
