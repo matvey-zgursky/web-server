@@ -11,6 +11,14 @@ MAX_LINE = 64 * 1024
 MAX_HEADERS = 100
 
 
+class HTTPError(Exception):
+    def __init__(self, status, reason, body=None) -> None:
+        super()
+        self.status = status
+        self.reason = reason
+        self.body = body
+
+
 class Request:
     def __init__(self, method, target, version, headers, rfile) -> None:
         self.method = method
@@ -38,11 +46,11 @@ class Request:
 
 
 class Response:
-    def __init__(self, status, phrase, headers=None, body=None) -> None:
+    def __init__(self, status, reason, headers=None, body=None) -> None:
         self.status = status
-        self.phrase = phrase
+        self.reason = reason
         self.headers = headers
-        self.body = body 
+        self.body = body
 
 
 class MyHTTPServer:
@@ -53,24 +61,51 @@ class MyHTTPServer:
         self._users = {}
 
     def send_error(self, conn, error):
-        pass
+        try:
+            status = error.status
+            reason = error.reason
+            body = (error.body or error.reason).encode('utf-8')
+        except:
+            status = 500
+            reason = b'Internal Server Error'
+            body = b'Internal Server Error'
+
+        response = Response(status,
+                            reason, [('Content-Length', len(body))],
+                            body)
+        self.send_response(conn, response)
 
     def send_response(self, conn, response):
-        pass
+        wfile = conn.makefile('wb')
+        status_line = f'HTTP/1.1 {response.status} {response.reason}\r\n'
+        wfile.write(status_line.encode('iso-8859-1'))
+
+        if response.headers:
+            for (key, value) in response.headers:
+                header_line = f'{key}: {value}\r\n'
+                wfile.write(header_line.encode('iso-8859-1'))
+
+        wfile.write(b'\r\n')
+
+        if response.body:
+            wfile.write(response.body)
+
+        wfile.flush()
+        wfile.close()
 
     def parse_request_line(self, rfile):
         raw = rfile.readline(MAX_LINE + 1)  # эффективно читаем строку целиком
         if len(raw) > MAX_LINE:
-            raise Exception('Request line is too long')
+            raise HTTPError(400, 'Bad request', 'Request line is too long')
 
         req_line = str(raw, 'iso-8859-1')
         words = req_line.split()  # разделяем по пробелу
         if len(words) != 3:  # и ожидаем ровно 3 части
-            raise Exception('Malformed request line')
+            raise HTTPError(400, 'Bad request', 'Malformed request line')
 
         method, target, ver = words
         if ver != 'HTTP/1.1':
-            raise Exception('Unexpected HTTP version')
+            raise HTTPError(505, 'HTTP Version Not Supported')
 
         return method, target, ver
 
@@ -80,12 +115,12 @@ class MyHTTPServer:
         while True:
             line = rfile.readline(MAX_LINE + 1)
             if len(line) > MAX_LINE:
-                raise Exception('Header line is too long')
+                raise HTTPError(494, 'Request header too large')
             if line in (b'\r\n', b'\n', b''):
                 break
             headers.append(line)
             if len(headers) > MAX_HEADERS:
-                raise Exception('Too many headers')
+                raise HTTPError(494, 'Too many headers')
 
         sheaders = b''.join(headers).decode('iso-8859-1')
 
@@ -99,11 +134,11 @@ class MyHTTPServer:
 
         host = headers.get('Host')
         if not host:
-            raise Exception('Bad request')
+            raise HTTPError(400, 'Bad request', 'Host header is missing')
 
         if host not in (self._server_name,
                         f'{self._server_name}:{self._port}'):
-            raise Exception('Not found')
+            raise HTTPError(404, 'Not found')
 
         return Request(method, target, ver, headers, rfile)
 
@@ -114,14 +149,14 @@ class MyHTTPServer:
             'name': request.query['name'][0],
             'age': request.query['age'][0]
         }
-        
+
         return Response(204, 'Created')
 
     def handle_get_users(self, request):
         accept = request.headers.get('Accept')
         if 'text/html' in accept:
-            contenttype = 'text/html; charset=utf-8'
-            body = '<html><head></head></html>'
+            contentType = 'text/html; charset=utf-8'
+            body = '<html><head></head><body>'
             body += f'<div>Пользователи ({len(self._users)})</div>'
             body += '<ul>'
             for user in self._users.values():
@@ -130,41 +165,40 @@ class MyHTTPServer:
             body += '</body></html>'
 
         elif 'application/json' in accept:
-            contenttype = 'application/json; charset=utf-8'
+            contentType = 'application/json; charset=utf-8'
             body = json.dumps(self._users)
-        
+
         else:
             return Response(406, 'Not Acceptable')
-        
+
         body = body.encode('utf-8')
-        headers = [('Content-Type', contenttype),
+        headers = [('Content-Type', contentType),
                    ('Content-Length', len(body))]
-            
         return Response(200, 'OK', headers, body)
 
     def handle_get_user(self, request, user_id):
         user = self._users.get(int(user_id))
         if not user:
-            return Response(404, 'Not Found')
+            raise HTTPError(404, 'Not found')
 
         accept = request.headers.get('Accept')
         if 'text/html' in accept:
             contenttype = 'text/html; charset=utf-8'
-            body = f'<html><head></head></html>'
+            body = f'<html><head></head><body>'
             body += f'Пользователь #{user["id"]} {user["name"]}, {user["age"]}'
             body += '</body></html>'
 
         elif 'application/json' in accept:
             contenttype = 'application/json; charset=utf-8'
             body = json.dumps(user)
-        
+
         else:
             return Response(406, 'Not Acceptable')
-        
+
         body = body.encode('utf-8')
         headers = [('Content-Type', contenttype),
                    ('Content-Length', len(body))]
-                
+
         return Response(200, 'OK', headers, body)
 
     def handle_request(self, request):
@@ -179,14 +213,13 @@ class MyHTTPServer:
             if user_id.isdigit():
                 return self.handle_get_user(request, user_id)
 
-        raise Exception('Not found')
+        raise HTTPError(404, 'Not found')
 
     def serve_client(self, conn: socket.socket) -> None:
         request = None
         try:
             request = self.parse_request(conn)
             response = self.handle_request(request)
-            print(response)
             self.send_response(conn, response)
         except ConnectionResetError:
             conn = None
