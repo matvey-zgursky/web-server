@@ -1,10 +1,11 @@
 import socket
 import json
 import sys
+from typing import Optional
 
 from email.parser import Parser
 from functools import lru_cache
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, ParseResult
 
 
 MAX_LINE = 64 * 1024
@@ -12,15 +13,23 @@ MAX_HEADERS = 100
 
 
 class HTTPError(Exception):
-    def __init__(self, status, reason, body=None) -> None:
-        super()
+    def __init__(self,
+                 status: int,
+                 reason: str,
+                 body: Optional[str] = None) -> None:
+        super().__init__()
         self.status = status
         self.reason = reason
         self.body = body
 
 
 class Request:
-    def __init__(self, method, target, version, headers, rfile) -> None:
+    def __init__(self,
+                 method: str,
+                 target: str,
+                 version: str,
+                 headers: dict[str, str],
+                 rfile: socket.SocketIO) -> None:
         self.method = method
         self.target = target
         self.version = version
@@ -29,28 +38,32 @@ class Request:
 
     @property
     @lru_cache(maxsize=None)
-    def url(self):
+    def url(self) -> ParseResult:
         return urlparse(self.target)
 
     @property
     @lru_cache(maxsize=None)
-    def query(self):
+    def query(self) -> dict[str, list[str]]:
         return parse_qs(self.url.query)
 
     @property
-    def path(self):
+    def path(self) -> str:
         return self.url.path
 
-    def read_body(self):
+    def read_body(self) -> Optional[bytes]:
         size = self.headers.get('Content-Length')
         if not size:
             return None
-        
-        return self.rfile.read(size)
+
+        return self.rfile.read(int(size))
 
 
 class Response:
-    def __init__(self, status, reason, headers=None, body=None) -> None:
+    def __init__(self,
+                 status: int,
+                 reason: str,
+                 headers: Optional[list[tuple[str, str | int]]] = None,
+                 body: Optional[bytes] = None) -> None:
         self.status = status
         self.reason = reason
         self.headers = headers
@@ -58,13 +71,13 @@ class Response:
 
 
 class MyHTTPServer:
-    def __init__(self, host, port, server_name) -> None:
+    def __init__(self, host: str, port: int, server_name: str) -> None:
         self._host = host
         self._port = port
         self._server_name = server_name
-        self._users = {}
+        self._users: dict[int, dict[str, int | str]] = {}
 
-    def send_error(self, conn, error):
+    def send_error(self, conn: socket.socket, error: HTTPError) -> None:
         try:
             status = error.status
             reason = error.reason
@@ -79,7 +92,7 @@ class MyHTTPServer:
                             body)
         self.send_response(conn, response)
 
-    def send_response(self, conn, response):
+    def send_response(self, conn: socket.socket, response: Response) -> None:
         wfile = conn.makefile('wb')
         status_line = f'HTTP/1.1 {response.status} {response.reason}\r\n'
         wfile.write(status_line.encode('iso-8859-1'))
@@ -97,23 +110,24 @@ class MyHTTPServer:
         wfile.flush()
         wfile.close()
 
-    def parse_request_line(self, rfile):
-        raw = rfile.readline(MAX_LINE + 1)  # эффективно читаем строку целиком
+    def parse_request_line(self,
+                           rfile: socket.SocketIO) -> tuple[str, str, str]:
+        raw = rfile.readline(MAX_LINE + 1) 
         if len(raw) > MAX_LINE:
             raise HTTPError(400, 'Bad request', 'Request line is too long')
 
-        req_line = str(raw, 'iso-8859-1')
-        words = req_line.split()  # разделяем по пробелу
-        if len(words) != 3:  # и ожидаем ровно 3 части
+        request_line = str(raw, 'iso-8859-1')
+        words = request_line.split()  
+        if len(words) != 3:  
             raise HTTPError(400, 'Bad request', 'Malformed request line')
 
-        method, target, ver = words
-        if ver != 'HTTP/1.1':
+        method, target, version = words
+        if version != 'HTTP/1.1':
             raise HTTPError(505, 'HTTP Version Not Supported')
 
-        return method, target, ver
+        return method, target, version
 
-    def parse_headers(self, rfile):
+    def parse_headers(self, rfile: socket.SocketIO) -> dict[str, str]:
         headers = []
 
         while True:
@@ -128,12 +142,12 @@ class MyHTTPServer:
 
         sheaders = b''.join(headers).decode('iso-8859-1')
 
-        return Parser().parsestr(sheaders)
+        return dict(Parser().parsestr(sheaders).items())
 
-    def parse_request(self, conn):
+    def parse_request(self, conn: socket.socket) -> Request:
         rfile = conn.makefile('rb')
 
-        method, target, ver = self.parse_request_line(rfile)
+        method, target, version = self.parse_request_line(rfile)
         headers = self.parse_headers(rfile)
 
         host = headers.get('Host')
@@ -144,9 +158,9 @@ class MyHTTPServer:
                         f'{self._server_name}:{self._port}'):
             raise HTTPError(404, 'Not found')
 
-        return Request(method, target, ver, headers, rfile)
+        return Request(method, target, version, headers, rfile)
 
-    def handle_post_users(self, request):
+    def handle_post_users(self, request: Request) -> Response:
         user_id = len(self._users) + 1
         self._users[user_id] = {
             'id': user_id,
@@ -156,7 +170,7 @@ class MyHTTPServer:
 
         return Response(204, 'Created')
 
-    def handle_get_users(self, request):
+    def handle_get_users(self, request: Request) -> Response:
         accept = request.headers.get('Accept')
         if 'text/html' in accept:
             contentType = 'text/html; charset=utf-8'
@@ -180,7 +194,7 @@ class MyHTTPServer:
                    ('Content-Length', len(body))]
         return Response(200, 'OK', headers, body)
 
-    def handle_get_user(self, request, user_id):
+    def handle_get_user(self, request: Request, user_id: str) -> Response:
         user = self._users.get(int(user_id))
         if not user:
             raise HTTPError(404, 'Not found')
@@ -205,7 +219,7 @@ class MyHTTPServer:
 
         return Response(200, 'OK', headers, body)
 
-    def handle_request(self, request):
+    def handle_request(self, request: Request) -> Response:
         if request.path == '/users' and request.method == 'POST':
             return self.handle_post_users(request)
 
@@ -255,9 +269,9 @@ class MyHTTPServer:
 if __name__ == '__main__':
     host = sys.argv[1]
     port = int(sys.argv[2])
-    name = sys.argv[3]
+    server_name = sys.argv[3]
 
-    server = MyHTTPServer(host, port, name)
+    server = MyHTTPServer(host, port, server_name)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
