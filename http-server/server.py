@@ -42,7 +42,11 @@ class Request:
         return self.url.path
 
     def read_body(self):
-        pass
+        size = self.headers.get('Content-Length')
+        if not size:
+            return None
+        
+        return self.rfile.read(size)
 
 
 class Response:
