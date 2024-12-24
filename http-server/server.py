@@ -234,7 +234,6 @@ class MyHTTPServer:
         raise HTTPError(404, 'Not found')
 
     def serve_client(self, conn: socket.socket) -> None:
-        request = None
         try:
             request = self.parse_request(conn)
             response = self.handle_request(request)
@@ -245,8 +244,7 @@ class MyHTTPServer:
             self.send_error(conn, ex)
 
         if conn:
-            if request and request.rfile:
-                request.rfile.close()
+            request.rfile.close()
             conn.close()
 
     def serve_forever(self) -> None:
